@@ -1,0 +1,954 @@
+openapi: 3.0.3
+
+info:
+  title: Audiencia, Comunidad y Engagement
+  version: 1.0.0
+  description: |
+    ## Responsabilidad
+    Gestionar la **relación social** entre usuarios, creadores y contenido:
+    suscripciones, reacciones, comentarios, notificaciones, historial personal
+    y posts de comunidad.
+
+    El usuario en este contexto es un **miembro de comunidad**: interactúa socialmente
+    con creadores y otros viewers. La suscripción aquí es una relación social, no de pago
+    (las suscripciones Premium pertenecen al servicio de Monetización).
+
+    ## Integración con otros servicios
+
+    ### Eventos que este servicio consume (asíncronos)
+    - `catalogo.contenido_publicado` (Catálogo): genera notificaciones a suscriptores del canal.
+    - `catalogo.contenido_despublicado` / `catalogo.restriccion_aplicada` (Catálogo): oculta
+      interacciones (comentarios, likes) asociadas al contenido si ya no es visible.
+
+    ### Eventos que este servicio emite (asíncronos)
+    - `audiencia.usuario_suscrito` / `audiencia.usuario_desuscrito`: consumido por Catálogo
+      (para conteo) y Notificaciones internas.
+    - `audiencia.comentario_publicado` / `audiencia.comentario_eliminado`.
+    - `audiencia.reaccion_registrada`.
+    - `audiencia.engagement_registrado`: señal agregada consumida por **Descubrimiento**
+      para actualizar el ranking de contenido.
+
+    ### Consultas síncronas que este servicio hace a otros
+    - Consulta `GET /items/{catalogItemId}/visibilidad` en **Catálogo** para validar que
+      el contenido/canal existe y es visible antes de registrar interacciones.
+
+    ## Nota sobre historial de visualización
+    El historial de visualización (qué vio el usuario y cuándo) se registra aquí
+    como dato social/personal del viewer. Las métricas técnicas de la sesión
+    (calidad, interrupciones) pertenecen a **Publicación**.
+
+servers:
+  - url: http://localhost:8004
+    description: Local Swagger (pruebas)
+
+
+tags:
+  - name: Suscripciones
+    description: Seguimiento de canales (RF-A1)
+  - name: Reacciones
+    description: Likes y dislikes en contenido (RF-A2)
+  - name: Comentarios
+    description: Comentarios y threads en contenido (RF-A3)
+  - name: Notificaciones
+    description: Notificaciones del usuario (RF-A4)
+  - name: Historial
+    description: Historial y listas personales del viewer (RF-A5)
+  - name: Comunidad
+    description: Posts de comunidad del canal (RF-A6)
+
+paths:
+
+  # ── RF-A1: Suscripciones ──────────────────────────────────────────────────
+
+  /suscripciones:
+    post:
+      tags: [Suscripciones]
+      summary: Suscribirse a un canal
+      description: |
+        El viewer sigue un canal. Emite el evento `audiencia.usuario_suscrito`.
+        Valida síncronamente con Catálogo que el canal existe.
+        **Actor permitido:** viewer autenticado.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuscribirseRequest'
+      responses:
+        '201':
+          description: Suscripción registrada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Suscripcion'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: Canal no encontrado en Catálogo
+        '409':
+          description: El usuario ya está suscrito a este canal
+
+  /suscripciones/{channelId}:
+    delete:
+      tags: [Suscripciones]
+      summary: Cancelar suscripción a un canal
+      description: |
+        Emite el evento `audiencia.usuario_desuscrito`.
+        **Actor permitido:** viewer autenticado (solo puede desuscribirse a sí mismo).
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      responses:
+        '204':
+          description: Suscripción cancelada
+        '404':
+          description: El usuario no está suscrito a este canal
+
+  /usuarios/{userId}/suscripciones:
+    get:
+      tags: [Suscripciones]
+      summary: Listar canales seguidos por un usuario
+      description: |
+        **Actor permitido:** el propio usuario autenticado.
+      parameters:
+        - $ref: '#/components/parameters/userId'
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          description: Lista paginada de canales seguidos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListaSuscripciones'
+
+  /canales/{channelId}/suscriptores/conteo:
+    get:
+      tags: [Suscripciones]
+      summary: Obtener conteo de suscriptores de un canal
+      description: |
+        **Actor permitido:** cualquier usuario.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      responses:
+        '200':
+          description: Conteo de suscriptores
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConteoSuscriptores'
+
+  # ── RF-A2: Reacciones ─────────────────────────────────────────────────────
+
+  /items/{catalogItemId}/reacciones:
+    post:
+      tags: [Reacciones]
+      summary: Registrar o actualizar reacción a un contenido
+      description: |
+        Permite expresar like o dislike. Si el usuario ya tiene una reacción, la reemplaza.
+        Emite el evento `audiencia.reaccion_registrada` y el agregado
+        `audiencia.engagement_registrado` para **Descubrimiento**.
+        Valida con Catálogo que el contenido es visible.
+        **Actor permitido:** viewer autenticado.
+      parameters:
+        - $ref: '#/components/parameters/catalogItemId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReaccionRequest'
+      responses:
+        '200':
+          description: Reacción registrada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reaccion'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Reacciones]
+      summary: Eliminar reacción previa de un contenido
+      description: |
+        **Actor permitido:** viewer autenticado (solo puede eliminar su propia reacción).
+      parameters:
+        - $ref: '#/components/parameters/catalogItemId'
+      responses:
+        '204':
+          description: Reacción eliminada
+
+    get:
+      tags: [Reacciones]
+      summary: Obtener totales agregados de reacciones de un contenido
+      description: |
+        **Actor permitido:** cualquier usuario.
+      parameters:
+        - $ref: '#/components/parameters/catalogItemId'
+      responses:
+        '200':
+          description: Totales de reacciones
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TotalesReacciones'
+
+  # ── RF-A3: Comentarios ────────────────────────────────────────────────────
+
+  /items/{catalogItemId}/comentarios:
+    post:
+      tags: [Comentarios]
+      summary: Publicar un comentario en un contenido
+      description: |
+        Emite `audiencia.comentario_publicado`.
+        **Actor permitido:** viewer autenticado.
+      parameters:
+        - $ref: '#/components/parameters/catalogItemId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublicarComentarioRequest'
+      responses:
+        '201':
+          description: Comentario publicado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Comentario'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+    get:
+      tags: [Comentarios]
+      summary: Listar comentarios de un contenido
+      description: |
+        Soporta ordenamiento configurable y paginación.
+        **Actor permitido:** cualquier usuario.
+      parameters:
+        - $ref: '#/components/parameters/catalogItemId'
+        - name: orden
+          in: query
+          schema:
+            type: string
+            enum: [recientes, top]
+            default: top
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          description: Lista paginada de comentarios
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListaComentarios'
+
+  /comentarios/{comentarioId}:
+    patch:
+      tags: [Comentarios]
+      summary: Editar un comentario propio
+      description: |
+        **Actor permitido:** autor del comentario.
+      parameters:
+        - $ref: '#/components/parameters/comentarioId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EditarComentarioRequest'
+      responses:
+        '200':
+          description: Comentario editado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Comentario'
+
+    delete:
+      tags: [Comentarios]
+      summary: Eliminar un comentario
+      description: |
+        Emite `audiencia.comentario_eliminado`.
+        **Actor permitido:** autor del comentario o creador del canal.
+      parameters:
+        - $ref: '#/components/parameters/comentarioId'
+      responses:
+        '204':
+          description: Comentario eliminado
+
+  /comentarios/{comentarioId}/respuestas:
+    post:
+      tags: [Comentarios]
+      summary: Responder a un comentario (thread)
+      description: |
+        **Actor permitido:** viewer autenticado.
+      parameters:
+        - $ref: '#/components/parameters/comentarioId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublicarComentarioRequest'
+      responses:
+        '201':
+          description: Respuesta publicada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Comentario'
+
+  /comentarios/{comentarioId}/fijar:
+    post:
+      tags: [Comentarios]
+      summary: Fijar un comentario como destacado
+      description: |
+        **Actor permitido:** creador dueño del canal donde está el contenido.
+      parameters:
+        - $ref: '#/components/parameters/comentarioId'
+      responses:
+        '200':
+          description: Comentario fijado
+
+  /comentarios/{comentarioId}/reportar:
+    post:
+      tags: [Comentarios]
+      summary: Reportar un comentario inapropiado
+      description: |
+        **Actor permitido:** viewer autenticado.
+      parameters:
+        - $ref: '#/components/parameters/comentarioId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReportarRequest'
+      responses:
+        '204':
+          description: Reporte registrado
+
+  # ── RF-A4: Notificaciones ─────────────────────────────────────────────────
+
+  /usuarios/{userId}/notificaciones:
+    get:
+      tags: [Notificaciones]
+      summary: Listar notificaciones del usuario
+      description: |
+        **Actor permitido:** el propio usuario autenticado.
+      parameters:
+        - $ref: '#/components/parameters/userId'
+        - name: soloNoLeidas
+          in: query
+          schema:
+            type: boolean
+            default: false
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          description: Lista paginada de notificaciones
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListaNotificaciones'
+
+  /usuarios/{userId}/notificaciones/marcar-leidas:
+    post:
+      tags: [Notificaciones]
+      summary: Marcar notificaciones como leídas
+      description: |
+        **Actor permitido:** el propio usuario autenticado.
+      parameters:
+        - $ref: '#/components/parameters/userId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MarcarLeidasRequest'
+      responses:
+        '204':
+          description: Marcadas como leídas
+
+  /usuarios/{userId}/preferencias-notificacion:
+    get:
+      tags: [Notificaciones]
+      summary: Consultar preferencias de notificación
+      parameters:
+        - $ref: '#/components/parameters/userId'
+      responses:
+        '200':
+          description: Preferencias actuales
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreferenciasNotificacion'
+
+    put:
+      tags: [Notificaciones]
+      summary: Actualizar preferencias de notificación
+      description: |
+        **Actor permitido:** el propio usuario autenticado.
+      parameters:
+        - $ref: '#/components/parameters/userId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PreferenciasNotificacion'
+      responses:
+        '200':
+          description: Preferencias actualizadas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreferenciasNotificacion'
+
+  # ── RF-A5: Historial y listas personales ──────────────────────────────────
+
+  /usuarios/{userId}/historial:
+    get:
+      tags: [Historial]
+      summary: Consultar historial de visualización del usuario
+      description: |
+        **Actor permitido:** el propio usuario autenticado.
+      parameters:
+        - $ref: '#/components/parameters/userId'
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          description: Historial paginado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListaHistorial'
+
+    delete:
+      tags: [Historial]
+      summary: Borrar historial de visualización (privacidad)
+      description: |
+        Borra todo el historial del usuario por razones de privacidad.
+        **Actor permitido:** el propio usuario autenticado.
+      parameters:
+        - $ref: '#/components/parameters/userId'
+      responses:
+        '204':
+          description: Historial borrado
+
+  /usuarios/{userId}/ver-despues:
+    get:
+      tags: [Historial]
+      summary: Listar contenido guardado para ver después
+      parameters:
+        - $ref: '#/components/parameters/userId'
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          description: Lista de contenido guardado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListaVerDespues'
+
+    post:
+      tags: [Historial]
+      summary: Guardar contenido para ver después
+      description: |
+        **Actor permitido:** viewer autenticado.
+      parameters:
+        - $ref: '#/components/parameters/userId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuardarVerDespuesRequest'
+      responses:
+        '201':
+          description: Guardado correctamente
+
+  /usuarios/{userId}/ver-despues/{catalogItemId}:
+    delete:
+      tags: [Historial]
+      summary: Quitar un ítem de la lista "ver después"
+      parameters:
+        - $ref: '#/components/parameters/userId'
+        - $ref: '#/components/parameters/catalogItemId'
+      responses:
+        '204':
+          description: Ítem eliminado de la lista
+
+  # ── RF-A6: Comunidad del canal ────────────────────────────────────────────
+
+  /canales/{channelId}/posts:
+    post:
+      tags: [Comunidad]
+      summary: Publicar un post de comunidad
+      description: |
+        El creador publica texto, encuesta o imagen independiente de un video.
+        **Actor permitido:** creador dueño del canal.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CrearPostRequest'
+      responses:
+        '201':
+          description: Post publicado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostComunidad'
+
+    get:
+      tags: [Comunidad]
+      summary: Listar posts de comunidad de un canal
+      description: |
+        **Actor permitido:** cualquier usuario.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          description: Lista paginada de posts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListaPosts'
+
+  /posts/{postId}/comentarios:
+    post:
+      tags: [Comunidad]
+      summary: Comentar en un post de comunidad
+      description: |
+        **Actor permitido:** viewer autenticado.
+      parameters:
+        - name: postId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublicarComentarioRequest'
+      responses:
+        '201':
+          description: Comentario publicado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Comentario'
+
+  /posts/{postId}/reacciones:
+    post:
+      tags: [Comunidad]
+      summary: Reaccionar a un post de comunidad
+      parameters:
+        - name: postId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReaccionRequest'
+      responses:
+        '200':
+          description: Reacción registrada
+
+# ── Componentes ──────────────────────────────────────────────────────────────
+
+components:
+
+  parameters:
+    userId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+    channelId:
+      name: channelId
+      in: path
+      required: true
+      schema:
+        type: string
+    catalogItemId:
+      name: catalogItemId
+      in: path
+      required: true
+      schema:
+        type: string
+    comentarioId:
+      name: comentarioId
+      in: path
+      required: true
+      schema:
+        type: string
+    page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+    pageSize:
+      name: pageSize
+      in: query
+      schema:
+        type: integer
+        default: 20
+        maximum: 100
+
+  responses:
+    BadRequest:
+      description: Solicitud inválida
+
+    NotFound:
+      description: Recurso no encontrado
+
+  schemas:
+
+
+    Suscripcion:
+      type: object
+      properties:
+        userId:
+          type: string
+        channelId:
+          type: string
+        suscritoEn:
+          type: string
+          format: date-time
+
+    SuscribirseRequest:
+      type: object
+      required: [channelId]
+      properties:
+        channelId:
+          type: string
+
+    ListaSuscripciones:
+      type: object
+      properties:
+        userId:
+          type: string
+        canales:
+          type: array
+          items:
+            type: object
+            properties:
+              channelId:
+                type: string
+              suscritoEn:
+                type: string
+                format: date-time
+        total:
+          type: integer
+        page:
+          type: integer
+        pageSize:
+          type: integer
+
+    ConteoSuscriptores:
+      type: object
+      properties:
+        channelId:
+          type: string
+        total:
+          type: integer
+
+    ReaccionRequest:
+      type: object
+      required: [tipo]
+      properties:
+        tipo:
+          type: string
+          enum: [like, dislike]
+
+    Reaccion:
+      type: object
+      properties:
+        userId:
+          type: string
+        catalogItemId:
+          type: string
+        tipo:
+          type: string
+          enum: [like, dislike]
+        registradaEn:
+          type: string
+          format: date-time
+
+    TotalesReacciones:
+      type: object
+      properties:
+        catalogItemId:
+          type: string
+        likes:
+          type: integer
+        dislikes:
+          type: integer
+      example:
+        catalogItemId: cat_item_001
+        likes: 4821
+        dislikes: 37
+
+    Comentario:
+      type: object
+      properties:
+        comentarioId:
+          type: string
+        catalogItemId:
+          type: string
+          nullable: true
+        postId:
+          type: string
+          nullable: true
+        autorId:
+          type: string
+        texto:
+          type: string
+        fijado:
+          type: boolean
+          default: false
+        respuestaA:
+          type: string
+          nullable: true
+          description: ID del comentario padre, si es una respuesta.
+        publicadoEn:
+          type: string
+          format: date-time
+        editadoEn:
+          type: string
+          format: date-time
+          nullable: true
+      example:
+        comentarioId: cmt_001
+        catalogItemId: cat_item_001
+        postId: null
+        autorId: usr_viewer_42
+        texto: "Excelente explicación, muy clara!"
+        fijado: false
+        respuestaA: null
+        publicadoEn: "2026-06-12T14:30:00Z"
+        editadoEn: null
+
+    PublicarComentarioRequest:
+      type: object
+      required: [texto]
+      properties:
+        texto:
+          type: string
+          maxLength: 2000
+
+    EditarComentarioRequest:
+      type: object
+      required: [texto]
+      properties:
+        texto:
+          type: string
+          maxLength: 2000
+
+    ReportarRequest:
+      type: object
+      required: [motivo]
+      properties:
+        motivo:
+          type: string
+          enum: [spam, odio, acoso, desinformacion, otro]
+
+    ListaComentarios:
+      type: object
+      properties:
+        catalogItemId:
+          type: string
+        comentarios:
+          type: array
+          items:
+            $ref: '#/components/schemas/Comentario'
+        total:
+          type: integer
+        page:
+          type: integer
+        pageSize:
+          type: integer
+
+    Notificacion:
+      type: object
+      properties:
+        notificacionId:
+          type: string
+        tipo:
+          type: string
+          enum: [nuevo_video, respuesta_comentario, nuevo_suscriptor, mencion]
+        leida:
+          type: boolean
+        payload:
+          type: object
+          description: Datos específicos del tipo de notificación (channelId, catalogItemId, etc.)
+        creadaEn:
+          type: string
+          format: date-time
+
+    ListaNotificaciones:
+      type: object
+      properties:
+        userId:
+          type: string
+        notificaciones:
+          type: array
+          items:
+            $ref: '#/components/schemas/Notificacion'
+        total:
+          type: integer
+        page:
+          type: integer
+        pageSize:
+          type: integer
+
+    MarcarLeidasRequest:
+      type: object
+      properties:
+        notificacionIds:
+          type: array
+          items:
+            type: string
+          description: Si está vacío, marca todas como leídas.
+
+    PreferenciasNotificacion:
+      type: object
+      properties:
+        userId:
+          type: string
+        nuevoVideo:
+          type: boolean
+          default: true
+        respuestaComentario:
+          type: boolean
+          default: true
+        menciones:
+          type: boolean
+          default: true
+
+    EntradaHistorial:
+      type: object
+      properties:
+        catalogItemId:
+          type: string
+        vistoEn:
+          type: string
+          format: date-time
+
+    ListaHistorial:
+      type: object
+      properties:
+        userId:
+          type: string
+        entradas:
+          type: array
+          items:
+            $ref: '#/components/schemas/EntradaHistorial'
+        total:
+          type: integer
+        page:
+          type: integer
+        pageSize:
+          type: integer
+
+    GuardarVerDespuesRequest:
+      type: object
+      required: [catalogItemId]
+      properties:
+        catalogItemId:
+          type: string
+
+    ListaVerDespues:
+      type: object
+      properties:
+        userId:
+          type: string
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              catalogItemId:
+                type: string
+              guardadoEn:
+                type: string
+                format: date-time
+        total:
+          type: integer
+        page:
+          type: integer
+        pageSize:
+          type: integer
+
+    PostComunidad:
+      type: object
+      properties:
+        postId:
+          type: string
+        channelId:
+          type: string
+        tipo:
+          type: string
+          enum: [texto, encuesta, imagen]
+        contenido:
+          type: string
+        opciones:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Opciones de encuesta, si el tipo es 'encuesta'.
+        publicadoEn:
+          type: string
+          format: date-time
+
+    CrearPostRequest:
+      type: object
+      required: [tipo, contenido]
+      properties:
+        tipo:
+          type: string
+          enum: [texto, encuesta, imagen]
+        contenido:
+          type: string
+        opciones:
+          type: array
+          items:
+            type: string
+          nullable: true
+
+    ListaPosts:
+      type: object
+      properties:
+        channelId:
+          type: string
+        posts:
+          type: array
+          items:
+            $ref: '#/components/schemas/PostComunidad'
+        total:
+          type: integer
+        page:
+          type: integer
+        pageSize:
+          type: integer

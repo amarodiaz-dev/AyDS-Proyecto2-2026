@@ -1,0 +1,893 @@
+openapi: 3.0.3
+
+info:
+  title: Monetización del Ecosistema Creador
+  version: 1.0.0
+  description: |
+    ## Responsabilidad
+    Gestionar **cómo los creadores ganan dinero** y cómo se registran, calculan y pagan
+    esos ingresos: elegibilidad, revenue share, membresías de canal, propinas,
+    saldo disponible y payouts.
+
+    El usuario en este contexto es un **creador con cuenta de ingresos** o un
+    **espectador que compra membresías o deja propinas**. La suscripción aquí
+    es de **pago**, no social (las suscripciones sociales pertenecen a Audiencia).
+
+    Este servicio NO negocia con anunciantes ni decide qué anuncio se muestra;
+    solo recibe los ingresos que Publicidad confirma y los atribuye al creador.
+
+    ## Integración con otros servicios
+
+    ### Eventos que este servicio consume (asíncronos)
+    - `publicidad.impresion_facturable_confirmada` (Publicidad): registra el ingreso
+      publicitario y lo atribuye al canal correspondiente.
+    - `catalogo.contenido_publicado` / `catalogo.contenido_despublicado` / `catalogo.restriccion_aplicada`
+      (Catálogo): puede inhabilitar monetización de contenidos restringidos.
+
+    ### Eventos que este servicio emite (asíncronos)
+    - `monetizacion.habilitada` / `monetizacion.deshabilitada`: notifica cambios de estado
+      de monetización de un canal.
+    - `monetizacion.ingreso_atribuido`: registra que un ingreso fue asignado a un creador.
+    - `monetizacion.pago_procesado`: confirma que un pago fue enviado al creador.
+
+    ## Consistencia eventual
+    Los ingresos publicitarios llegan con cierto retraso desde Publicidad. El saldo
+    mostrado al creador puede estar pendiente de confirmación por parte de Publicidad.
+    Los estados `pendiente` → `confirmado` → `pagado` reflejan este ciclo.
+
+servers:
+  - url: http://localhost:8005
+    description: Local Swagger (pruebas)
+
+
+tags:
+  - name: Elegibilidad
+    description: Alta y evaluación de elegibilidad para monetización (RF-M1)
+  - name: Productos
+    description: Membresías y propinas configuradas por el creador (RF-M2)
+  - name: Ingresos
+    description: Registro y consulta de ingresos (RF-M3, RF-M4)
+  - name: Pagos
+    description: Saldo y solicitudes de retiro (RF-M5)
+
+paths:
+
+  # ── RF-M1: Alta y elegibilidad ────────────────────────────────────────────
+
+  /canales/{channelId}/monetizacion:
+    post:
+      tags: [Elegibilidad]
+      summary: Solicitar activación de monetización para un canal
+      description: |
+        El creador solicita monetizar su canal. El sistema evalúa los requisitos de
+        elegibilidad (suscriptores, horas de visualización, cumplimiento de políticas).
+        Emite `monetizacion.habilitada` si se aprueba.
+        **Actor permitido:** creador dueño del canal.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      responses:
+        '202':
+          description: Solicitud recibida; evaluación en curso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EstadoElegibilidad'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+    get:
+      tags: [Elegibilidad]
+      summary: Consultar estado de elegibilidad y monetización del canal
+      description: |
+        Devuelve si el canal está apto, pendiente o rechazado, y el motivo en caso de rechazo.
+        **Actor permitido:** creador dueño del canal.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      responses:
+        '200':
+          description: Estado de elegibilidad
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EstadoElegibilidad'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /canales/{channelId}/monetizacion/estado:
+    patch:
+      tags: [Elegibilidad]
+      summary: Activar o desactivar monetización del canal
+      description: |
+        Emite `monetizacion.habilitada` o `monetizacion.deshabilitada`.
+        **Actor permitido:** creador dueño del canal, administrador.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CambiarEstadoMonetizacionRequest'
+      responses:
+        '200':
+          description: Estado actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EstadoElegibilidad'
+
+  /canales/{channelId}/items/{catalogItemId}/monetizacion:
+    patch:
+      tags: [Elegibilidad]
+      summary: Activar o desactivar monetización de un contenido específico
+      description: |
+        Permite deshabilitar monetización a nivel de ítem individual dentro del canal.
+        **Actor permitido:** creador dueño del canal.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+        - $ref: '#/components/parameters/catalogItemId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CambiarEstadoMonetizacionRequest'
+      responses:
+        '200':
+          description: Estado actualizado
+
+  # ── RF-M2: Configuración de productos del creador ─────────────────────────
+
+  /canales/{channelId}/membresias:
+    post:
+      tags: [Productos]
+      summary: Crear un nivel de membresía de canal
+      description: |
+        Define precio y beneficios de un nivel de membresía.
+        **Actor permitido:** creador dueño del canal.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CrearMembresiaRequest'
+      responses:
+        '201':
+          description: Nivel de membresía creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NivelMembresia'
+
+    get:
+      tags: [Productos]
+      summary: Listar niveles de membresía del canal
+      description: |
+        **Actor permitido:** cualquier usuario (para ver qué niveles existen).
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      responses:
+        '200':
+          description: Niveles de membresía disponibles
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListaMembresias'
+
+  /canales/{channelId}/membresias/{membresiaId}:
+    patch:
+      tags: [Productos]
+      summary: Actualizar un nivel de membresía
+      description: |
+        **Actor permitido:** creador dueño del canal.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+        - name: membresiaId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CrearMembresiaRequest'
+      responses:
+        '200':
+          description: Membresía actualizada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NivelMembresia'
+
+  /compras/membresias:
+    post:
+      tags: [Productos]
+      summary: Registrar compra de membresía por un espectador
+      description: |
+        Registra que un viewer compró una membresía de canal.
+        El cobro real es gestionado por un servicio de pagos compartido externo;
+        este endpoint registra el ingreso resultante.
+        **Actor permitido:** viewer autenticado, sistema de pagos.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ComprarMembresiaRequest'
+      responses:
+        '201':
+          description: Compra registrada e ingreso atribuido al creador
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompraMembresia'
+
+  /items/{catalogItemId}/propinas:
+    post:
+      tags: [Productos]
+      summary: Registrar una propina en un video
+      description: |
+        Un viewer deja una propina en un video. El cobro lo gestiona el servicio
+        de pagos externo; este endpoint registra el ingreso.
+        **Actor permitido:** viewer autenticado, sistema de pagos.
+      parameters:
+        - $ref: '#/components/parameters/catalogItemId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DejarPropinaRequest'
+      responses:
+        '201':
+          description: Propina registrada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Propina'
+
+  /canales/{channelId}/propinas:
+    get:
+      tags: [Productos]
+      summary: Consultar configuración de propinas del canal
+      description: |
+        **Actor permitido:** creador dueño del canal.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      responses:
+        '200':
+          description: Configuración de propinas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfiguracionPropinas'
+
+    patch:
+      tags: [Productos]
+      summary: Actualizar configuración de propinas del canal
+      description: |
+        **Actor permitido:** creador dueño del canal.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfiguracionPropinas'
+      responses:
+        '200':
+          description: Configuración actualizada
+
+  # ── RF-M3: Registro de ingresos ───────────────────────────────────────────
+
+  /ingresos:
+    post:
+      tags: [Ingresos]
+      summary: Registrar un ingreso publicitario confirmado por Publicidad
+      description: |
+        Endpoint interno llamado cuando se recibe el evento
+        `publicidad.impresion_facturable_confirmada`. Aplica las reglas de revenue share
+        y atribuye el ingreso al canal. Emite `monetizacion.ingreso_atribuido`.
+        **Actor permitido:** sistema interno (Publicidad).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegistrarIngresoRequest'
+      responses:
+        '201':
+          description: Ingreso registrado y atribuido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ingreso'
+
+  # ── RF-M4: Consulta de ganancias ──────────────────────────────────────────
+
+  /canales/{channelId}/ganancias:
+    get:
+      tags: [Ingresos]
+      summary: Consultar ganancias por periodo
+      description: |
+        Devuelve ganancias agrupadas por día o mes, con desglose por fuente.
+        **Actor permitido:** creador dueño del canal.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+        - name: desde
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: hasta
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: agrupacion
+          in: query
+          schema:
+            type: string
+            enum: [dia, mes]
+            default: mes
+      responses:
+        '200':
+          description: Reporte de ganancias
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReporteGanancias'
+
+  /canales/{channelId}/ganancias/por-video:
+    get:
+      tags: [Ingresos]
+      summary: Ver desglose de ganancias por video
+      description: |
+        Incluye RPM y fuente de ingreso por cada ítem de catálogo.
+        **Actor permitido:** creador dueño del canal.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+        - name: desde
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: hasta
+          in: query
+          schema:
+            type: string
+            format: date
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          description: Desglose por video paginado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DesglosePorVideo'
+
+  /canales/{channelId}/ganancias/reporte:
+    get:
+      tags: [Ingresos]
+      summary: Generar reporte exportable de ganancias
+      description: |
+        Devuelve un archivo CSV o JSON con el detalle de ingresos del periodo.
+        **Actor permitido:** creador dueño del canal.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+        - name: desde
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: hasta
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: formato
+          in: query
+          schema:
+            type: string
+            enum: [csv, json]
+            default: csv
+      responses:
+        '200':
+          description: Archivo de reporte
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Ingreso'
+
+  # ── RF-M5: Pagos ──────────────────────────────────────────────────────────
+
+  /canales/{channelId}/saldo:
+    get:
+      tags: [Pagos]
+      summary: Consultar saldo disponible del creador
+      description: |
+        Incluye desglose de montos confirmados vs. pendientes.
+        **Actor permitido:** creador dueño del canal.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      responses:
+        '200':
+          description: Saldo del creador
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Saldo'
+
+  /canales/{channelId}/retiros:
+    post:
+      tags: [Pagos]
+      summary: Solicitar retiro de saldo
+      description: |
+        Solo disponible si el saldo supera el mínimo configurado.
+        Emite `monetizacion.pago_procesado` cuando el retiro se completa.
+        **Actor permitido:** creador dueño del canal.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SolicitarRetiroRequest'
+      responses:
+        '202':
+          description: Retiro solicitado; en procesamiento
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Retiro'
+        '422':
+          description: Saldo insuficiente o no supera el mínimo
+
+    get:
+      tags: [Pagos]
+      summary: Consultar historial de pagos realizados
+      description: |
+        **Actor permitido:** creador dueño del canal.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          description: Historial paginado de retiros
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListaRetiros'
+
+  /canales/{channelId}/documentos-fiscales:
+    get:
+      tags: [Pagos]
+      summary: Consultar documentación fiscal del creador
+      description: |
+        Soporta la documentación requerida para cobrar (formularios de impuestos, etc.).
+        **Actor permitido:** creador dueño del canal.
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      responses:
+        '200':
+          description: Documentos fiscales registrados
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentosFiscales'
+
+    put:
+      tags: [Pagos]
+      summary: Actualizar documentación fiscal del creador
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentosFiscales'
+      responses:
+        '200':
+          description: Documentación actualizada
+
+# ── Componentes ──────────────────────────────────────────────────────────────
+
+components:
+
+  parameters:
+    channelId:
+      name: channelId
+      in: path
+      required: true
+      schema:
+        type: string
+    catalogItemId:
+      name: catalogItemId
+      in: path
+      required: true
+      schema:
+        type: string
+    page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+    pageSize:
+      name: pageSize
+      in: query
+      schema:
+        type: integer
+        default: 20
+        maximum: 100
+
+  responses:
+    BadRequest:
+      description: Solicitud inválida
+
+    NotFound:
+      description: Recurso no encontrado
+
+  schemas:
+
+
+    EstadoElegibilidad:
+      type: object
+      properties:
+        channelId:
+          type: string
+        estado:
+          type: string
+          enum: [no_solicitado, pendiente, apto, rechazado, deshabilitado]
+        motivoRechazo:
+          type: string
+          nullable: true
+        monetizacionActiva:
+          type: boolean
+        evaluadoEn:
+          type: string
+          format: date-time
+          nullable: true
+      example:
+        channelId: ch_001
+        estado: apto
+        motivoRechazo: null
+        monetizacionActiva: true
+        evaluadoEn: "2026-05-01T09:00:00Z"
+
+    CambiarEstadoMonetizacionRequest:
+      type: object
+      required: [activo]
+      properties:
+        activo:
+          type: boolean
+        motivo:
+          type: string
+          nullable: true
+
+    NivelMembresia:
+      type: object
+      properties:
+        membresiaId:
+          type: string
+        channelId:
+          type: string
+        nombre:
+          type: string
+        precioCLP:
+          type: number
+          format: float
+        beneficios:
+          type: array
+          items:
+            type: string
+        activo:
+          type: boolean
+
+    CrearMembresiaRequest:
+      type: object
+      required: [nombre, precioCLP, beneficios]
+      properties:
+        nombre:
+          type: string
+        precioCLP:
+          type: number
+          format: float
+        beneficios:
+          type: array
+          items:
+            type: string
+
+    ListaMembresias:
+      type: object
+      properties:
+        channelId:
+          type: string
+        niveles:
+          type: array
+          items:
+            $ref: '#/components/schemas/NivelMembresia'
+
+    ComprarMembresiaRequest:
+      type: object
+      required: [membresiaId, userId, referenciaTransaccion]
+      properties:
+        membresiaId:
+          type: string
+        userId:
+          type: string
+        referenciaTransaccion:
+          type: string
+          description: ID de la transacción confirmada por el servicio de pagos externo.
+
+    CompraMembresia:
+      type: object
+      properties:
+        compraId:
+          type: string
+        membresiaId:
+          type: string
+        userId:
+          type: string
+        channelId:
+          type: string
+        montoTotalCLP:
+          type: number
+        ingresoAtribuidoCLP:
+          type: number
+        registradaEn:
+          type: string
+          format: date-time
+
+    DejarPropinaRequest:
+      type: object
+      required: [userId, montoCLP, referenciaTransaccion]
+      properties:
+        userId:
+          type: string
+        montoCLP:
+          type: number
+        mensaje:
+          type: string
+          nullable: true
+        referenciaTransaccion:
+          type: string
+
+    Propina:
+      type: object
+      properties:
+        propinaId:
+          type: string
+        catalogItemId:
+          type: string
+        userId:
+          type: string
+        montoCLP:
+          type: number
+        ingresoAtribuidoCLP:
+          type: number
+        registradaEn:
+          type: string
+          format: date-time
+
+    ConfiguracionPropinas:
+      type: object
+      properties:
+        channelId:
+          type: string
+        habilitado:
+          type: boolean
+        montoMinimoCLP:
+          type: number
+
+    RegistrarIngresoRequest:
+      type: object
+      required: [channelId, catalogItemId, montoUSD, fuenteIngreso, referenciaEvento]
+      properties:
+        channelId:
+          type: string
+        catalogItemId:
+          type: string
+        montoUSD:
+          type: number
+          format: float
+        fuenteIngreso:
+          type: string
+          enum: [publicidad, membresia, propina]
+        referenciaEvento:
+          type: string
+          description: ID del evento de Publicidad o transacción que originó el ingreso.
+
+    Ingreso:
+      type: object
+      properties:
+        ingresoId:
+          type: string
+        channelId:
+          type: string
+        catalogItemId:
+          type: string
+        montoTotalUSD:
+          type: number
+        montoCreadorUSD:
+          type: number
+          description: Monto después de aplicar revenue share.
+        fuenteIngreso:
+          type: string
+          enum: [publicidad, membresia, propina]
+        estado:
+          type: string
+          enum: [pendiente, confirmado, pagado]
+        registradoEn:
+          type: string
+          format: date-time
+
+    ReporteGanancias:
+      type: object
+      properties:
+        channelId:
+          type: string
+        desde:
+          type: string
+          format: date
+        hasta:
+          type: string
+          format: date
+        totalUSD:
+          type: number
+        periodos:
+          type: array
+          items:
+            type: object
+            properties:
+              periodo:
+                type: string
+              publicidadUSD:
+                type: number
+              membresiaUSD:
+                type: number
+              propinaUSD:
+                type: number
+              totalUSD:
+                type: number
+
+    DesglosePorVideo:
+      type: object
+      properties:
+        channelId:
+          type: string
+        videos:
+          type: array
+          items:
+            type: object
+            properties:
+              catalogItemId:
+                type: string
+              publicidadUSD:
+                type: number
+              membresiaUSD:
+                type: number
+              propinaUSD:
+                type: number
+              totalUSD:
+                type: number
+              rpmUSD:
+                type: number
+                description: Revenue por mil reproducciones.
+        total:
+          type: integer
+        page:
+          type: integer
+        pageSize:
+          type: integer
+
+    Saldo:
+      type: object
+      properties:
+        channelId:
+          type: string
+        disponibleUSD:
+          type: number
+          description: Monto confirmado y disponible para retiro.
+        pendienteUSD:
+          type: number
+          description: Monto aún en estado pendiente de confirmación.
+        minimoRetiroUSD:
+          type: number
+      example:
+        channelId: ch_001
+        disponibleUSD: 142.50
+        pendienteUSD: 28.75
+        minimoRetiroUSD: 100.00
+
+    SolicitarRetiroRequest:
+      type: object
+      required: [montoUSD, metodoPago]
+      properties:
+        montoUSD:
+          type: number
+        metodoPago:
+          type: string
+          enum: [transferencia_bancaria, paypal]
+        referenciaCuentaPago:
+          type: string
+
+    Retiro:
+      type: object
+      properties:
+        retiroId:
+          type: string
+        channelId:
+          type: string
+        montoUSD:
+          type: number
+        estado:
+          type: string
+          enum: [en_proceso, completado, rechazado]
+        solicitadoEn:
+          type: string
+          format: date-time
+        completadoEn:
+          type: string
+          format: date-time
+          nullable: true
+
+    ListaRetiros:
+      type: object
+      properties:
+        channelId:
+          type: string
+        retiros:
+          type: array
+          items:
+            $ref: '#/components/schemas/Retiro'
+        total:
+          type: integer
+        page:
+          type: integer
+        pageSize:
+          type: integer
+
+    DocumentosFiscales:
+      type: object
+      properties:
+        channelId:
+          type: string
+        pais:
+          type: string
+        rut:
+          type: string
+          nullable: true
+        razonSocial:
+          type: string
+          nullable: true
+        documentosAdjuntos:
+          type: array
+          items:
+            type: object
+            properties:
+              tipo:
+                type: string
+              urlDocumento:
+                type: string
+                format: uri
+              subidoEn:
+                type: string
+                format: date-time

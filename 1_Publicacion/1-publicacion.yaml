@@ -1,0 +1,664 @@
+openapi: 3.0.3
+
+info:
+  title: Publicación y Distribución de Contenido
+  version: 1.0.0
+  description: |
+    ## Responsabilidad
+    Este servicio gestiona el **ciclo de vida técnico del video**: subida, procesamiento,
+    almacenamiento, reproducción y transmisión en vivo.
+
+    El video en este contexto es un **archivo o stream**, no un producto editorial.
+    No decide si el video es visible al público ni gestiona metadata visible (título,
+    descripción, tags): esa responsabilidad pertenece al servicio de Catálogo.
+
+    ## Integración con otros servicios
+    Este servicio emite los siguientes **eventos asincrónicos** que otros contextos consumen:
+    - `contenido.subido`: emitido cuando el archivo fue recibido completamente.
+    - `procesamiento.finalizado`: emitido cuando el transcoding termina (éxito o fallo).
+    - `asset.listo_para_publicacion`: emitido cuando el asset está técnicamente listo; lo consume **Catálogo**.
+    - `sesion_reproduccion.completada`: emitido al terminar una sesión; lo consume **Descubrimiento**.
+    - `live.iniciado` / `live.finalizado`: emitidos durante transmisiones en vivo.
+
+    ## Consistencia eventual
+    Catálogo puede tardar unos segundos en recibir el evento `asset.listo_para_publicacion`.
+    Si un cliente consulta el estado antes de que Catálogo procese el evento, el asset puede
+    aparecer como técnicamente listo pero aún no publicado editorialmente.
+
+servers:
+  - url: http://localhost:8001
+    description: Local Swagger (pruebas)
+
+
+tags:
+  - name: Subida
+    description: Operaciones de carga de archivos de video (RF-P1)
+  - name: Procesamiento
+    description: Consulta del estado de transcoding (RF-P2)
+  - name: Reproducción
+    description: Sesiones de playback y datos para reproducir (RF-P3)
+  - name: Live
+    description: Configuración y control de transmisiones en vivo (RF-P4)
+  - name: Assets
+    description: Consulta de assets técnicos del creador (RF-P5)
+
+paths:
+
+  # ── RF-P1: Gestión de subida ──────────────────────────────────────────────
+
+  /uploads:
+    post:
+      tags: [Subida]
+      summary: Iniciar una subida de video
+      description: |
+        Un creador inicia el proceso de subida. El servidor devuelve un `uploadId`
+        y la URL donde debe enviarse el archivo (completo o por partes).
+        **Actor permitido:** creador autenticado.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IniciarSubidaRequest'
+      responses:
+        '201':
+          description: Subida iniciada correctamente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubidaIniciada'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /uploads/{uploadId}:
+    get:
+      tags: [Subida]
+      summary: Consultar estado de progreso de una subida
+      description: |
+        Devuelve el porcentaje de progreso y el estado actual de la subida.
+        **Actor permitido:** creador dueño de la subida.
+      parameters:
+        - $ref: '#/components/parameters/uploadId'
+      responses:
+        '200':
+          description: Estado de la subida
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EstadoSubida'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Subida]
+      summary: Cancelar una subida en curso
+      description: |
+        Cancela y elimina una subida que aún no ha finalizado.
+        **Actor permitido:** creador dueño de la subida.
+      parameters:
+        - $ref: '#/components/parameters/uploadId'
+      responses:
+        '204':
+          description: Subida cancelada
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: La subida ya finalizó y no puede cancelarse
+
+  /uploads/{uploadId}/partes:
+    post:
+      tags: [Subida]
+      summary: Subir una parte (chunk) del archivo
+      description: |
+        Sube una parte del archivo en subidas multipart. El cliente debe indicar
+        el número de parte y el rango de bytes correspondiente.
+        **Actor permitido:** creador dueño de la subida.
+      parameters:
+        - $ref: '#/components/parameters/uploadId'
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Parte recibida correctamente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParteCargada'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /uploads/{uploadId}/completar:
+    post:
+      tags: [Subida]
+      summary: Marcar la subida como completa y validar el archivo
+      description: |
+        El creador indica que todas las partes fueron enviadas. El sistema valida
+        la integridad del archivo. Si la validación es exitosa, se emite el evento
+        `contenido.subido` y se inicia automáticamente el procesamiento.
+        **Actor permitido:** creador dueño de la subida.
+      parameters:
+        - $ref: '#/components/parameters/uploadId'
+      responses:
+        '200':
+          description: Subida validada; procesamiento iniciado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubidaCompletada'
+        '422':
+          description: Archivo inválido o corrupto
+
+  # ── RF-P2: Procesamiento técnico ─────────────────────────────────────────
+
+  /assets/{videoAssetId}/procesamiento:
+    get:
+      tags: [Procesamiento]
+      summary: Consultar estado del procesamiento (transcoding)
+      description: |
+        Devuelve el estado actual del transcoding: pendiente, en_curso, completado o fallido.
+        También indica las calidades disponibles cuando el procesamiento termina.
+        **Actor permitido:** creador dueño del asset, sistema interno.
+      parameters:
+        - $ref: '#/components/parameters/videoAssetId'
+      responses:
+        '200':
+          description: Estado del procesamiento
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EstadoProcesamiento'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /assets/{videoAssetId}/procesamiento/reintentar:
+    post:
+      tags: [Procesamiento]
+      summary: Reintentar un procesamiento fallido
+      description: |
+        Solo puede ejecutarse si el estado actual es `fallido`.
+        **Actor permitido:** creador dueño del asset, sistema interno.
+      parameters:
+        - $ref: '#/components/parameters/videoAssetId'
+      responses:
+        '202':
+          description: Reintento iniciado
+        '409':
+          description: El procesamiento no está en estado fallido
+
+  # ── RF-P3: Reproducción ───────────────────────────────────────────────────
+
+  /assets/{videoAssetId}/playback:
+    get:
+      tags: [Reproducción]
+      summary: Obtener datos de reproducción para un dispositivo
+      description: |
+        Devuelve las URLs de stream y las calidades disponibles adaptadas al dispositivo,
+        ancho de banda y región del viewer. Este endpoint NO valida si el contenido
+        es visible públicamente; esa validación la realiza el servicio de Catálogo.
+        **Actor permitido:** viewer autenticado o anónimo (según política del catálogo).
+      parameters:
+        - $ref: '#/components/parameters/videoAssetId'
+        - name: dispositivo
+          in: query
+          schema:
+            type: string
+            enum: [web, mobile, tv, embebido]
+        - name: anchoBandaKbps
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Datos de reproducción
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DatosPlayback'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /sesiones-reproduccion:
+    post:
+      tags: [Reproducción]
+      summary: Registrar inicio de sesión de reproducción
+      description: |
+        El cliente registra que comenzó a reproducir un video. Devuelve un `sesionId`
+        que debe usarse para reportar progreso y finalización.
+        Al completarse la sesión, se emite el evento `sesion_reproduccion.completada`
+        que consume **Descubrimiento** como señal de interés.
+        **Actor permitido:** viewer autenticado o anónimo.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IniciarSesionRequest'
+      responses:
+        '201':
+          description: Sesión iniciada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SesionIniciada'
+
+  /sesiones-reproduccion/{sesionId}:
+    patch:
+      tags: [Reproducción]
+      summary: Reportar progreso o finalización de una sesión
+      description: |
+        El cliente envía métricas técnicas (segundos vistos, calidad, interrupciones).
+        Si el campo `estado` es `finalizada`, se emite el evento correspondiente.
+        **Actor permitido:** viewer dueño de la sesión.
+      parameters:
+        - name: sesionId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActualizarSesionRequest'
+      responses:
+        '200':
+          description: Sesión actualizada
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── RF-P4: Transmisión en vivo ────────────────────────────────────────────
+
+  /lives:
+    post:
+      tags: [Live]
+      summary: Configurar una transmisión en vivo
+      description: |
+        El creador crea una transmisión en vivo y recibe las credenciales de conexión
+        para usar con software externo (OBS, StreamYard, etc.).
+        **Actor permitido:** creador autenticado.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CrearLiveRequest'
+      responses:
+        '201':
+          description: Live configurado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveCreado'
+
+  /lives/{liveId}/estado:
+    patch:
+      tags: [Live]
+      summary: Cambiar estado del live (iniciar, pausar, finalizar)
+      description: |
+        Transiciones permitidas: `configurado → activo`, `activo → pausado`,
+        `pausado → activo`, `activo → finalizado`.
+        Al pasar a `finalizado`, el sistema puede generar un asset de video on-demand
+        (se emite el evento `live.finalizado`).
+        **Actor permitido:** creador dueño del live.
+      parameters:
+        - name: liveId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CambiarEstadoLiveRequest'
+      responses:
+        '200':
+          description: Estado actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EstadoLive'
+        '409':
+          description: Transición de estado no permitida
+
+  # ── RF-P5: Consulta de assets técnicos ───────────────────────────────────
+
+  /assets:
+    get:
+      tags: [Assets]
+      summary: Listar assets técnicos de un creador
+      description: |
+        Devuelve todos los assets de video (subidos o procesados) asociados a un creador.
+        Soporta paginación.
+        **Actor permitido:** creador autenticado (solo ve sus propios assets).
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          description: Lista paginada de assets
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListaAssets'
+
+  /assets/{videoAssetId}:
+    get:
+      tags: [Assets]
+      summary: Consultar detalle técnico de un asset
+      description: |
+        Devuelve duración, formatos disponibles, estado de procesamiento y metadatos técnicos.
+        No incluye título, descripción ni tags (eso es responsabilidad de Catálogo).
+        **Actor permitido:** creador dueño del asset, sistema interno (Catálogo).
+      parameters:
+        - $ref: '#/components/parameters/videoAssetId'
+      responses:
+        '200':
+          description: Detalle técnico del asset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetalleAsset'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+# ── Componentes ──────────────────────────────────────────────────────────────
+
+components:
+
+  parameters:
+    uploadId:
+      name: uploadId
+      in: path
+      required: true
+      schema:
+        type: string
+    videoAssetId:
+      name: videoAssetId
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Identificador del asset técnico. Este mismo ID es referenciado por Catálogo como `videoAssetId`.
+    page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+    pageSize:
+      name: pageSize
+      in: query
+      schema:
+        type: integer
+        default: 20
+        maximum: 100
+
+  responses:
+    BadRequest:
+      description: Solicitud inválida
+
+    NotFound:
+      description: Recurso no encontrado
+
+  schemas:
+
+
+    IniciarSubidaRequest:
+      type: object
+      required: [nombreArchivo, tamanioBytes, mimeType]
+      properties:
+        nombreArchivo:
+          type: string
+        tamanioBytes:
+          type: integer
+          format: int64
+        mimeType:
+          type: string
+          enum: [video/mp4, video/quicktime, video/x-matroska]
+        modalidad:
+          type: string
+          enum: [completa, multipart]
+          default: completa
+
+    SubidaIniciada:
+      type: object
+      properties:
+        uploadId:
+          type: string
+        urlSubida:
+          type: string
+          format: uri
+        expiraEn:
+          type: string
+          format: date-time
+      example:
+        uploadId: upld_abc123
+        urlSubida: https://storage.youtube-interno.com/upload/upld_abc123
+        expiraEn: "2026-06-12T18:00:00Z"
+
+    EstadoSubida:
+      type: object
+      properties:
+        uploadId:
+          type: string
+        estado:
+          type: string
+          enum: [en_curso, completada, cancelada, fallida]
+        progresoPorcentaje:
+          type: number
+          format: float
+        bytesRecibidos:
+          type: integer
+          format: int64
+      example:
+        uploadId: upld_abc123
+        estado: en_curso
+        progresoPorcentaje: 47.3
+        bytesRecibidos: 104857600
+
+    ParteCargada:
+      type: object
+      properties:
+        numeroParte:
+          type: integer
+        bytesRecibidos:
+          type: integer
+          format: int64
+
+    SubidaCompletada:
+      type: object
+      properties:
+        uploadId:
+          type: string
+        videoAssetId:
+          type: string
+          description: ID del asset técnico creado. Catálogo usará este ID para vincularlo.
+        estadoProcesamiento:
+          type: string
+          enum: [pendiente]
+
+    EstadoProcesamiento:
+      type: object
+      properties:
+        videoAssetId:
+          type: string
+        estado:
+          type: string
+          enum: [pendiente, en_curso, completado, fallido]
+        calidades:
+          type: array
+          items:
+            type: string
+            enum: [360p, 480p, 720p, 1080p, 1440p, 2160p]
+        errorDetalle:
+          type: string
+          nullable: true
+      example:
+        videoAssetId: asset_xyz789
+        estado: completado
+        calidades: [360p, 720p, 1080p]
+        errorDetalle: null
+
+    DatosPlayback:
+      type: object
+      properties:
+        videoAssetId:
+          type: string
+        urlStream:
+          type: string
+          format: uri
+        formato:
+          type: string
+          enum: [HLS, DASH]
+        calidadesDisponibles:
+          type: array
+          items:
+            type: string
+        urlMiniatura:
+          type: string
+          format: uri
+      example:
+        videoAssetId: asset_xyz789
+        urlStream: https://stream.youtube-interno.com/asset_xyz789/master.m3u8
+        formato: HLS
+        calidadesDisponibles: [360p, 720p, 1080p]
+        urlMiniatura: https://thumb.youtube-interno.com/asset_xyz789.jpg
+
+    IniciarSesionRequest:
+      type: object
+      required: [videoAssetId]
+      properties:
+        videoAssetId:
+          type: string
+        dispositivo:
+          type: string
+          enum: [web, mobile, tv, embebido]
+        calidad:
+          type: string
+
+    SesionIniciada:
+      type: object
+      properties:
+        sesionId:
+          type: string
+        iniciadaEn:
+          type: string
+          format: date-time
+
+    ActualizarSesionRequest:
+      type: object
+      properties:
+        segundosVistos:
+          type: number
+        calidad:
+          type: string
+        interrupciones:
+          type: integer
+        estado:
+          type: string
+          enum: [en_curso, finalizada, abandonada]
+
+    CrearLiveRequest:
+      type: object
+      required: [titulo]
+      properties:
+        titulo:
+          type: string
+          description: Título interno del live (no es metadata editorial pública).
+        programadaEn:
+          type: string
+          format: date-time
+
+    LiveCreado:
+      type: object
+      properties:
+        liveId:
+          type: string
+        estado:
+          type: string
+          enum: [configurado]
+        credenciales:
+          type: object
+          properties:
+            rtmpUrl:
+              type: string
+            streamKey:
+              type: string
+
+    CambiarEstadoLiveRequest:
+      type: object
+      required: [nuevoEstado]
+      properties:
+        nuevoEstado:
+          type: string
+          enum: [activo, pausado, finalizado]
+        generarVod:
+          type: boolean
+          default: true
+          description: Si es true y el live finaliza, se genera un asset de video on-demand.
+
+    EstadoLive:
+      type: object
+      properties:
+        liveId:
+          type: string
+        estado:
+          type: string
+          enum: [configurado, activo, pausado, finalizado]
+        vodAssetId:
+          type: string
+          nullable: true
+          description: ID del asset on-demand generado al finalizar, si aplica.
+
+    DetalleAsset:
+      type: object
+      properties:
+        videoAssetId:
+          type: string
+        duracionSegundos:
+          type: number
+        tamanioBytes:
+          type: integer
+          format: int64
+        mimeTypeOriginal:
+          type: string
+        calidades:
+          type: array
+          items:
+            type: string
+        estadoProcesamiento:
+          type: string
+          enum: [pendiente, en_curso, completado, fallido]
+        creadoEn:
+          type: string
+          format: date-time
+      example:
+        videoAssetId: asset_xyz789
+        duracionSegundos: 312.5
+        tamanioBytes: 524288000
+        mimeTypeOriginal: video/mp4
+        calidades: [360p, 720p, 1080p]
+        estadoProcesamiento: completado
+        creadoEn: "2026-06-12T10:00:00Z"
+
+    ListaAssets:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DetalleAsset'
+        total:
+          type: integer
+        page:
+          type: integer
+        pageSize:
+          type: integer

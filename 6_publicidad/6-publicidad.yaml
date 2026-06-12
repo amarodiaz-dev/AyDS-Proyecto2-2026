@@ -1,0 +1,1091 @@
+openapi: 3.0.3
+
+info:
+  title: Publicidad y Marketplace de Anunciantes
+  version: 1.0.0
+  description: |
+    ## Responsabilidad
+    Gestionar el **negocio publicitario B2B**: anunciantes, campañas, creativos,
+    decisiones de qué anuncio mostrar, medición de impresiones y billing.
+
+    El usuario en este contexto es un **anunciante**: una empresa o persona que paga
+    para mostrar anuncios en el inventario de YouTube. Este servicio NO paga al
+    creador directamente; cuando confirma una impresión facturable, emite un evento
+    que **Monetización** consume para atribuir el ingreso al creador.
+
+    ## Integración con otros servicios
+
+    ### Eventos que este servicio consume (asíncronos)
+    - `catalogo.contenido_publicado` (Catálogo): agrega el contenido al inventario
+      disponible para mostrar anuncios.
+    - `catalogo.contenido_despublicado` / `catalogo.restriccion_aplicada` (Catálogo):
+      retira el contenido del inventario o lo marca como no elegible.
+    - `audiencia.engagement_registrado` (Audiencia) y señales de Descubrimiento:
+      usadas para brand safety y segmentación por intereses.
+
+    ### Eventos que este servicio emite (asíncronos)
+    - `publicidad.anuncio_servido`: registro de cada decisión de mostrar un anuncio.
+    - `publicidad.impresion_facturable_confirmada`: consumido por **Monetización**
+      para atribuir ingreso al creador.
+    - `publicidad.ingreso_publicitario_generado`: para reportes internos de la plataforma.
+    - `publicidad.presupuesto_agotado`: notifica cuando una campaña se queda sin fondos.
+
+    ### Consultas síncronas que este servicio hace a otros
+    - Consulta `GET /items/{catalogItemId}/elegibilidad-publicidad` en **Catálogo**
+      para verificar que el contenido puede recibir anuncios antes de servirlos.
+
+    ## Consistencia eventual
+    El inventario disponible puede estar momentáneamente desincronizado con Catálogo.
+    Un contenido despublicado puede recibir una decisión de ad antes de que el evento
+    llegue; por eso la validación síncrona con Catálogo se realiza en el momento de
+    entrega del anuncio (RF-F6).
+
+servers:
+  - url: http://localhost:8006
+    description: Local Swagger (pruebas)
+
+
+tags:
+  - name: Anunciantes
+    description: Gestión de cuentas de anunciantes (RF-F1)
+  - name: Campanas
+    description: Creación y control de campañas publicitarias (RF-F2)
+  - name: Creativos
+    description: Subida y asociación de creativos publicitarios (RF-F3)
+  - name: Targeting
+    description: Criterios de segmentación e inventario estimado (RF-F4)
+  - name: Inventario
+    description: Elegibilidad del inventario para publicidad (RF-F5)
+  - name: Entrega
+    description: Decisión y registro de anuncios servidos (RF-F6, RF-F7)
+  - name: Reportes
+    description: Métricas, reportes e invoices para anunciantes (RF-F8)
+
+paths:
+
+  # ── RF-F1: Gestión de anunciantes ─────────────────────────────────────────
+
+  /anunciantes:
+    post:
+      tags: [Anunciantes]
+      summary: Registrar una cuenta de anunciante
+      description: |
+        Crea una cuenta de anunciante con sus datos de facturación.
+        **Actor permitido:** anunciante que se registra, administrador.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CrearAnuncianteRequest'
+      responses:
+        '201':
+          description: Cuenta de anunciante creada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Anunciante'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /anunciantes/{anuncianteId}:
+    get:
+      tags: [Anunciantes]
+      summary: Consultar datos de un anunciante
+      description: |
+        **Actor permitido:** el propio anunciante autenticado, administrador.
+      parameters:
+        - $ref: '#/components/parameters/anuncianteId'
+      responses:
+        '200':
+          description: Datos del anunciante
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Anunciante'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags: [Anunciantes]
+      summary: Actualizar datos de facturación del anunciante
+      description: |
+        **Actor permitido:** el propio anunciante autenticado, administrador.
+      parameters:
+        - $ref: '#/components/parameters/anuncianteId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActualizarAnuncianteRequest'
+      responses:
+        '200':
+          description: Datos actualizados
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Anunciante'
+
+  # ── RF-F2: Campañas ───────────────────────────────────────────────────────
+
+  /anunciantes/{anuncianteId}/campanas:
+    post:
+      tags: [Campanas]
+      summary: Crear una campaña publicitaria
+      description: |
+        Define objetivo, presupuesto y vigencia de la campaña.
+        Una campaña recién creada queda en estado `borrador` hasta que se activa.
+        **Actor permitido:** anunciante dueño de la cuenta.
+      parameters:
+        - $ref: '#/components/parameters/anuncianteId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CrearCampanaRequest'
+      responses:
+        '201':
+          description: Campaña creada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Campana'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+    get:
+      tags: [Campanas]
+      summary: Listar campañas de un anunciante
+      description: |
+        **Actor permitido:** anunciante dueño de la cuenta.
+      parameters:
+        - $ref: '#/components/parameters/anuncianteId'
+        - name: estado
+          in: query
+          schema:
+            type: string
+            enum: [borrador, activa, pausada, finalizada, presupuesto_agotado]
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          description: Lista paginada de campañas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListaCampanas'
+
+  /campanas/{campanaId}:
+    get:
+      tags: [Campanas]
+      summary: Consultar detalle de una campaña
+      parameters:
+        - $ref: '#/components/parameters/campanaId'
+      responses:
+        '200':
+          description: Detalle de la campaña
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Campana'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /campanas/{campanaId}/estado:
+    patch:
+      tags: [Campanas]
+      summary: Pausar, reanudar o finalizar una campaña
+      description: |
+        Transiciones permitidas: `borrador → activa`, `activa → pausada`,
+        `pausada → activa`, `activa → finalizada`, `pausada → finalizada`.
+        Cuando el presupuesto se agota, el sistema pasa la campaña automáticamente
+        a `presupuesto_agotado` y emite el evento `publicidad.presupuesto_agotado`.
+        **Actor permitido:** anunciante dueño de la campaña.
+      parameters:
+        - $ref: '#/components/parameters/campanaId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CambiarEstadoCampanaRequest'
+      responses:
+        '200':
+          description: Estado actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Campana'
+        '409':
+          description: Transición de estado no permitida
+
+  # ── RF-F3: Creativos publicitarios ────────────────────────────────────────
+
+  /anunciantes/{anuncianteId}/creativos:
+    post:
+      tags: [Creativos]
+      summary: Subir y registrar un creativo publicitario
+      description: |
+        Registra un creativo (video, imagen, display). El creativo pasa por
+        validación automática según políticas publicitarias antes de quedar
+        disponible para asociarse a campañas.
+        **Actor permitido:** anunciante dueño de la cuenta.
+      parameters:
+        - $ref: '#/components/parameters/anuncianteId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CrearCreativoRequest'
+      responses:
+        '201':
+          description: Creativo registrado; validación en curso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Creativo'
+
+    get:
+      tags: [Creativos]
+      summary: Listar creativos de un anunciante
+      parameters:
+        - $ref: '#/components/parameters/anuncianteId'
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          description: Lista paginada de creativos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListaCreativos'
+
+  /campanas/{campanaId}/creativos:
+    post:
+      tags: [Creativos]
+      summary: Asociar un creativo aprobado a una campaña
+      description: |
+        Solo se pueden asociar creativos en estado `aprobado`.
+        **Actor permitido:** anunciante dueño de la campaña.
+      parameters:
+        - $ref: '#/components/parameters/campanaId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AsociarCreativoRequest'
+      responses:
+        '200':
+          description: Creativo asociado a la campaña
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Campana'
+        '422':
+          description: El creativo no está aprobado o no pertenece al mismo anunciante
+
+  # ── RF-F4: Targeting ──────────────────────────────────────────────────────
+
+  /campanas/{campanaId}/targeting:
+    put:
+      tags: [Targeting]
+      summary: Definir o actualizar criterios de segmentación de una campaña
+      description: |
+        Permite definir país, rango de edad, intereses y categorías de contenido
+        donde se quiere mostrar el anuncio.
+        **Actor permitido:** anunciante dueño de la campaña.
+      parameters:
+        - $ref: '#/components/parameters/campanaId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TargetingRequest'
+      responses:
+        '200':
+          description: Targeting actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Targeting'
+
+    get:
+      tags: [Targeting]
+      summary: Consultar targeting actual de una campaña
+      parameters:
+        - $ref: '#/components/parameters/campanaId'
+      responses:
+        '200':
+          description: Targeting de la campaña
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Targeting'
+
+  /targeting/inventario-estimado:
+    post:
+      tags: [Targeting]
+      summary: Estimar inventario disponible para un conjunto de criterios de targeting
+      description: |
+        Devuelve una estimación de cuántas impresiones diarias están disponibles
+        para los criterios de segmentación dados. Útil antes de crear la campaña.
+        **Actor permitido:** anunciante autenticado.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TargetingRequest'
+      responses:
+        '200':
+          description: Estimación de inventario
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventarioEstimado'
+
+  # ── RF-F5: Inventario publicitario ────────────────────────────────────────
+
+  /inventario/items/{catalogItemId}:
+    get:
+      tags: [Inventario]
+      summary: Consultar elegibilidad de un ítem para recibir anuncios
+      description: |
+        Valida síncronamente con **Catálogo** (`GET /items/{catalogItemId}/elegibilidad-publicidad`)
+        si el contenido puede recibir publicidad. Considera restricciones de catálogo,
+        edad mínima, bloqueos geográficos y políticas de brand safety.
+        **Actor permitido:** sistema interno (motor de decisión de anuncios).
+      parameters:
+        - $ref: '#/components/parameters/catalogItemId'
+        - name: pais
+          in: query
+          schema:
+            type: string
+            example: CL
+      responses:
+        '200':
+          description: Estado de elegibilidad del ítem
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElegibilidadInventario'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /inventario/items:
+    post:
+      tags: [Inventario]
+      summary: Agregar un ítem al inventario publicitario
+      description: |
+        Endpoint interno llamado cuando se recibe el evento `catalogo.contenido_publicado`.
+        Registra el ítem como disponible para recibir anuncios (sujeto a elegibilidad).
+        **Actor permitido:** sistema interno.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgregarInventarioRequest'
+      responses:
+        '204':
+          description: Ítem agregado al inventario
+
+  /inventario/items/{catalogItemId}:
+    delete:
+      tags: [Inventario]
+      summary: Retirar un ítem del inventario publicitario
+      description: |
+        Llamado cuando se recibe `catalogo.contenido_despublicado` o
+        `catalogo.restriccion_aplicada`. El ítem deja de ser elegible para anuncios.
+        **Actor permitido:** sistema interno.
+      parameters:
+        - $ref: '#/components/parameters/catalogItemId'
+      responses:
+        '204':
+          description: Ítem retirado del inventario
+
+  # ── RF-F6: Entrega de anuncios ────────────────────────────────────────────
+
+  /decision-anuncio:
+    post:
+      tags: [Entrega]
+      summary: Decidir qué anuncio mostrar en una oportunidad de visualización
+      description: |
+        El cliente (reproductor de video) llama a este endpoint cuando hay una
+        oportunidad de mostrar un anuncio (inicio, mid-roll, etc.).
+        El sistema considera: campañas activas, targeting, subasta/prioridad y brand safety.
+        Antes de decidir, valida con Catálogo que el contenido es elegible.
+        Si no hay anuncio adecuado, devuelve `anuncioId: null`.
+        Emite el evento `publicidad.anuncio_servido`.
+        **Actor permitido:** sistema interno (reproductor / servidor de video).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionAnuncioRequest'
+      responses:
+        '200':
+          description: Decisión de anuncio (puede ser vacía si no hay anuncio disponible)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionAnuncio'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  # ── RF-F7: Medición ───────────────────────────────────────────────────────
+
+  /eventos-anuncio:
+    post:
+      tags: [Entrega]
+      summary: Registrar un evento de interacción con un anuncio
+      description: |
+        Registra impresiones, clicks y skips. Cuando se confirma una impresión
+        facturable, emite `publicidad.impresion_facturable_confirmada` para que
+        **Monetización** atribuya el ingreso al creador.
+        También actualiza el gasto de la campaña; si se agota el presupuesto,
+        emite `publicidad.presupuesto_agotado`.
+        **Actor permitido:** sistema interno (reproductor).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventoAnuncioRequest'
+      responses:
+        '204':
+          description: Evento registrado
+
+  # ── RF-F8: Reporting para anunciantes ─────────────────────────────────────
+
+  /campanas/{campanaId}/metricas:
+    get:
+      tags: [Reportes]
+      summary: Consultar métricas de una campaña
+      description: |
+        Devuelve impresiones, clicks, CTR, CPM y gasto total del periodo.
+        **Actor permitido:** anunciante dueño de la campaña.
+      parameters:
+        - $ref: '#/components/parameters/campanaId'
+        - name: desde
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: hasta
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Métricas de la campaña
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricasCampana'
+
+  /campanas/{campanaId}/reporte:
+    get:
+      tags: [Reportes]
+      summary: Generar reporte exportable de una campaña
+      description: |
+        Exporta el detalle de impresiones, clicks y gasto en CSV o JSON.
+        **Actor permitido:** anunciante dueño de la campaña.
+      parameters:
+        - $ref: '#/components/parameters/campanaId'
+        - name: desde
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: hasta
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: formato
+          in: query
+          schema:
+            type: string
+            enum: [csv, json]
+            default: csv
+      responses:
+        '200':
+          description: Reporte exportado
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FilaReporte'
+
+  /anunciantes/{anuncianteId}/invoices:
+    get:
+      tags: [Reportes]
+      summary: Listar invoices (facturas) del anunciante
+      description: |
+        **Actor permitido:** anunciante dueño de la cuenta.
+      parameters:
+        - $ref: '#/components/parameters/anuncianteId'
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          description: Lista paginada de invoices
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListaInvoices'
+
+  /anunciantes/{anuncianteId}/invoices/{invoiceId}:
+    get:
+      tags: [Reportes]
+      summary: Descargar un invoice específico
+      parameters:
+        - $ref: '#/components/parameters/anuncianteId'
+        - name: invoiceId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Invoice en PDF
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+# ── Componentes ───────────────────────────────────────────────────────────────
+
+components:
+
+  parameters:
+    anuncianteId:
+      name: anuncianteId
+      in: path
+      required: true
+      schema:
+        type: string
+    campanaId:
+      name: campanaId
+      in: path
+      required: true
+      schema:
+        type: string
+    catalogItemId:
+      name: catalogItemId
+      in: path
+      required: true
+      schema:
+        type: string
+      description: ID del ítem en el servicio de Catálogo. Compartido como referencia, no como modelo.
+    page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+    pageSize:
+      name: pageSize
+      in: query
+      schema:
+        type: integer
+        default: 20
+        maximum: 100
+
+  responses:
+    BadRequest:
+      description: Solicitud inválida
+
+    NotFound:
+      description: Recurso no encontrado
+
+  schemas:
+
+
+    Anunciante:
+      type: object
+      description: |
+        Representación del anunciante en este contexto. El anunciante es el
+        cliente B2B principal de este servicio.
+      properties:
+        anuncianteId:
+          type: string
+        razonSocial:
+          type: string
+        email:
+          type: string
+          format: email
+        facturacion:
+          $ref: '#/components/schemas/DatosFacturacion'
+        creadoEn:
+          type: string
+          format: date-time
+
+    CrearAnuncianteRequest:
+      type: object
+      required: [razonSocial, email, facturacion]
+      properties:
+        razonSocial:
+          type: string
+        email:
+          type: string
+          format: email
+        facturacion:
+          $ref: '#/components/schemas/DatosFacturacion'
+
+    ActualizarAnuncianteRequest:
+      type: object
+      properties:
+        razonSocial:
+          type: string
+        email:
+          type: string
+          format: email
+        facturacion:
+          $ref: '#/components/schemas/DatosFacturacion'
+
+    DatosFacturacion:
+      type: object
+      properties:
+        rut:
+          type: string
+        direccion:
+          type: string
+        pais:
+          type: string
+        metodoPago:
+          type: string
+          enum: [tarjeta_credito, transferencia, prepago]
+
+    Campana:
+      type: object
+      description: |
+        Una campaña publicitaria. El "video" en este contexto es un
+        slot publicitario dentro del inventario, no un asset técnico.
+      properties:
+        campanaId:
+          type: string
+        anuncianteId:
+          type: string
+        nombre:
+          type: string
+        objetivo:
+          type: string
+          enum: [awareness, consideracion, conversion]
+        presupuestoUSD:
+          type: number
+          format: float
+        gastoActualUSD:
+          type: number
+          format: float
+        estado:
+          type: string
+          enum: [borrador, activa, pausada, finalizada, presupuesto_agotado]
+        vigenciaDesde:
+          type: string
+          format: date
+        vigenciaHasta:
+          type: string
+          format: date
+        creativoIds:
+          type: array
+          items:
+            type: string
+        targeting:
+          $ref: '#/components/schemas/Targeting'
+        creadaEn:
+          type: string
+          format: date-time
+      example:
+        campanaId: camp_001
+        anuncianteId: anunc_001
+        nombre: "Campaña Verano 2026"
+        objetivo: awareness
+        presupuestoUSD: 5000.00
+        gastoActualUSD: 1230.50
+        estado: activa
+        vigenciaDesde: "2026-06-01"
+        vigenciaHasta: "2026-06-30"
+        creativoIds: [creat_001, creat_002]
+        creadaEn: "2026-05-28T10:00:00Z"
+
+    CrearCampanaRequest:
+      type: object
+      required: [nombre, objetivo, presupuestoUSD, vigenciaDesde, vigenciaHasta]
+      properties:
+        nombre:
+          type: string
+        objetivo:
+          type: string
+          enum: [awareness, consideracion, conversion]
+        presupuestoUSD:
+          type: number
+          format: float
+        vigenciaDesde:
+          type: string
+          format: date
+        vigenciaHasta:
+          type: string
+          format: date
+
+    CambiarEstadoCampanaRequest:
+      type: object
+      required: [nuevoEstado]
+      properties:
+        nuevoEstado:
+          type: string
+          enum: [activa, pausada, finalizada]
+
+    ListaCampanas:
+      type: object
+      properties:
+        anuncianteId:
+          type: string
+        campanas:
+          type: array
+          items:
+            $ref: '#/components/schemas/Campana'
+        total:
+          type: integer
+        page:
+          type: integer
+        pageSize:
+          type: integer
+
+    Creativo:
+      type: object
+      properties:
+        creativoId:
+          type: string
+        anuncianteId:
+          type: string
+        tipo:
+          type: string
+          enum: [video_preroll, video_midroll, display, banner]
+        urlAsset:
+          type: string
+          format: uri
+          description: URL del archivo del creativo (almacenado externamente).
+        estadoValidacion:
+          type: string
+          enum: [pendiente, aprobado, rechazado]
+        motivoRechazo:
+          type: string
+          nullable: true
+        creadoEn:
+          type: string
+          format: date-time
+
+    CrearCreativoRequest:
+      type: object
+      required: [tipo, urlAsset]
+      properties:
+        tipo:
+          type: string
+          enum: [video_preroll, video_midroll, display, banner]
+        urlAsset:
+          type: string
+          format: uri
+
+    AsociarCreativoRequest:
+      type: object
+      required: [creativoId]
+      properties:
+        creativoId:
+          type: string
+
+    ListaCreativos:
+      type: object
+      properties:
+        anuncianteId:
+          type: string
+        creativos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Creativo'
+        total:
+          type: integer
+        page:
+          type: integer
+        pageSize:
+          type: integer
+
+    Targeting:
+      type: object
+      properties:
+        campanaId:
+          type: string
+        paises:
+          type: array
+          items:
+            type: string
+          example: [CL, AR, PE]
+        edadMinima:
+          type: integer
+          nullable: true
+        edadMaxima:
+          type: integer
+          nullable: true
+        intereses:
+          type: array
+          items:
+            type: string
+          description: Lista de etiquetas de intereses (ej. tecnología, deportes).
+        categorias:
+          type: array
+          items:
+            type: string
+          description: Categorías de contenido donde se quiere aparecer.
+        excluirCategorias:
+          type: array
+          items:
+            type: string
+          description: Categorías excluidas por brand safety del anunciante.
+
+    TargetingRequest:
+      type: object
+      properties:
+        paises:
+          type: array
+          items:
+            type: string
+        edadMinima:
+          type: integer
+          nullable: true
+        edadMaxima:
+          type: integer
+          nullable: true
+        intereses:
+          type: array
+          items:
+            type: string
+        categorias:
+          type: array
+          items:
+            type: string
+        excluirCategorias:
+          type: array
+          items:
+            type: string
+
+    InventarioEstimado:
+      type: object
+      properties:
+        impresionesEstimadasDiarias:
+          type: integer
+        alcanceEstimadoUsuarios:
+          type: integer
+        cpmEstimadoUSD:
+          type: number
+          format: float
+
+    ElegibilidadInventario:
+      type: object
+      properties:
+        catalogItemId:
+          type: string
+        elegible:
+          type: boolean
+        motivoNoElegible:
+          type: string
+          nullable: true
+
+    AgregarInventarioRequest:
+      type: object
+      required: [catalogItemId, channelId, categoria]
+      properties:
+        catalogItemId:
+          type: string
+        channelId:
+          type: string
+        categoria:
+          type: string
+        pais:
+          type: string
+          nullable: true
+
+    DecisionAnuncioRequest:
+      type: object
+      required: [catalogItemId, formato, contexto]
+      properties:
+        catalogItemId:
+          type: string
+          description: El ítem de catálogo donde ocurre la oportunidad publicitaria.
+        formato:
+          type: string
+          enum: [preroll, midroll, display]
+        contexto:
+          type: object
+          description: Datos del viewer para personalización y targeting.
+          properties:
+            userId:
+              type: string
+              nullable: true
+            pais:
+              type: string
+            edad:
+              type: integer
+              nullable: true
+            dispositivo:
+              type: string
+              enum: [web, mobile, tv]
+
+    DecisionAnuncio:
+      type: object
+      properties:
+        decisionId:
+          type: string
+        anuncioId:
+          type: string
+          nullable: true
+          description: null si no hay anuncio disponible para esta oportunidad.
+        creativoId:
+          type: string
+          nullable: true
+        campanaId:
+          type: string
+          nullable: true
+        formato:
+          type: string
+          enum: [preroll, midroll, display]
+        urlCreativo:
+          type: string
+          format: uri
+          nullable: true
+        duracionSegundos:
+          type: integer
+          nullable: true
+        saltableEnSegundos:
+          type: integer
+          nullable: true
+          description: Segundos tras los que el viewer puede saltar el anuncio. null si no es saltable.
+      example:
+        decisionId: dec_001
+        anuncioId: ad_001
+        creativoId: creat_001
+        campanaId: camp_001
+        formato: preroll
+        urlCreativo: https://cdn.publicidad-interno.com/creat_001.mp4
+        duracionSegundos: 15
+        saltableEnSegundos: 5
+
+    EventoAnuncioRequest:
+      type: object
+      required: [decisionId, tipoEvento]
+      properties:
+        decisionId:
+          type: string
+          description: ID de la decisión emitida por /decision-anuncio.
+        tipoEvento:
+          type: string
+          enum: [impresion, click, skip, completado]
+        timestampMs:
+          type: integer
+          format: int64
+
+    MetricasCampana:
+      type: object
+      properties:
+        campanaId:
+          type: string
+        desde:
+          type: string
+          format: date
+        hasta:
+          type: string
+          format: date
+        impresiones:
+          type: integer
+        clicks:
+          type: integer
+        skips:
+          type: integer
+        ctr:
+          type: number
+          format: float
+          description: Click-through rate (clicks / impresiones).
+        cpmUSD:
+          type: number
+          format: float
+          description: Costo por mil impresiones.
+        gastoTotalUSD:
+          type: number
+          format: float
+      example:
+        campanaId: camp_001
+        desde: "2026-06-01"
+        hasta: "2026-06-12"
+        impresiones: 48200
+        clicks: 1446
+        skips: 9200
+        ctr: 0.03
+        cpmUSD: 2.55
+        gastoTotalUSD: 1230.50
+
+    FilaReporte:
+      type: object
+      properties:
+        fecha:
+          type: string
+          format: date
+        catalogItemId:
+          type: string
+        formato:
+          type: string
+        impresiones:
+          type: integer
+        clicks:
+          type: integer
+        gastoUSD:
+          type: number
+
+    Invoice:
+      type: object
+      properties:
+        invoiceId:
+          type: string
+        anuncianteId:
+          type: string
+        periodo:
+          type: string
+          example: "2026-05"
+        montoUSD:
+          type: number
+        estado:
+          type: string
+          enum: [pendiente, pagado]
+        emitidoEn:
+          type: string
+          format: date-time
+
+    ListaInvoices:
+      type: object
+      properties:
+        anuncianteId:
+          type: string
+        invoices:
+          type: array
+          items:
+            $ref: '#/components/schemas/Invoice'
+        total:
+          type: integer
+        page:
+          type: integer
+        pageSize:
+          type: integer
