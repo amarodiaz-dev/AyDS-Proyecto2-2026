@@ -352,6 +352,18 @@ paths:
   # ── RF-F5: Inventario publicitario ────────────────────────────────────────
 
   /inventario/items/{catalogItemId}:
+    delete:
+      tags: [Inventario]
+      summary: Retirar un ítem del inventario publicitario
+      description: |
+        Llamado cuando se recibe `catalogo.contenido_despublicado` o
+        `catalogo.restriccion_aplicada`. El ítem deja de ser elegible para anuncios.
+        **Actor permitido:** sistema interno.
+      parameters:
+        - $ref: '#/components/parameters/catalogItemId'
+      responses:
+        '204':
+          description: Ítem retirado del inventario
     get:
       tags: [Inventario]
       summary: Consultar elegibilidad de un ítem para recibir anuncios
@@ -395,19 +407,6 @@ paths:
         '204':
           description: Ítem agregado al inventario
 
-  /inventario/items/{catalogItemId}:
-    delete:
-      tags: [Inventario]
-      summary: Retirar un ítem del inventario publicitario
-      description: |
-        Llamado cuando se recibe `catalogo.contenido_despublicado` o
-        `catalogo.restriccion_aplicada`. El ítem deja de ser elegible para anuncios.
-        **Actor permitido:** sistema interno.
-      parameters:
-        - $ref: '#/components/parameters/catalogItemId'
-      responses:
-        '204':
-          description: Ítem retirado del inventario
 
   # ── RF-F6: Entrega de anuncios ────────────────────────────────────────────
 
